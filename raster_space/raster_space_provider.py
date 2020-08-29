@@ -31,29 +31,16 @@ __copyright__ = '(C) 2019 by Timofey Samsonov, Lomonosov MSU Faculty of Geograph
 __revision__ = '$Format:%H$'
 
 from qgis.core import QgsProcessingProvider
-from .raster_space_algorithm import RasterSpaceAlgorithm
+from .raster_space_algorithm import SpaceWidthAlgorithm
 
 
 class RasterSpaceProvider(QgsProcessingProvider):
 
-    def __init__(self):
-        """
-        Default constructor.
-        """
-        QgsProcessingProvider.__init__(self)
-
-    def unload(self):
-        """
-        Unloads the provider. Any tear-down steps required by the provider
-        should be implemented here.
-        """
-        pass
-
-    def loadAlgorithms(self):
+    def loadAlgorithms(self, *args, **kwargs):
         """
         Loads all algorithms belonging to this provider.
         """
-        self.addAlgorithm(RasterSpaceAlgorithm())
+        self.addAlgorithm(SpaceWidthAlgorithm())
         # add additional algorithms here
         # self.addAlgorithm(MyOtherAlgorithm())
 
@@ -63,7 +50,7 @@ class RasterSpaceProvider(QgsProcessingProvider):
         string should be a unique, short, character only string, eg "qgis" or
         "gdal". This string should not be localised.
         """
-        return 'Raster Space'
+        return 'rasterspace'
 
     def name(self):
         """
@@ -80,12 +67,3 @@ class RasterSpaceProvider(QgsProcessingProvider):
         the Processing toolbox.
         """
         return QgsProcessingProvider.icon(self)
-
-    def longName(self):
-        """
-        Returns the a longer version of the provider name, which can include
-        extra details such as version numbers. E.g. "Lastools LIDAR tools
-        (version 2.2.1)". This string should be localised. The default
-        implementation returns the same string as name().
-        """
-        return self.name()

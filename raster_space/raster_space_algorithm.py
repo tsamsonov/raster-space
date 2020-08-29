@@ -33,93 +33,45 @@ __revision__ = '$Format:%H$'
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (QgsProcessing,
                        QgsFeatureSink,
+                       QgsProcessingException,
                        QgsProcessingAlgorithm,
+                       QgsProcessingParameterFileDestination,
+                       QgsProcessingParameterNumber,
                        QgsProcessingParameterFeatureSource,
                        QgsProcessingParameterFeatureSink)
 
+import gdal, ogr, os, osr
+import numpy as np
 
-class RasterSpaceAlgorithm(QgsProcessingAlgorithm):
+
+class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
     """
-    This is an example algorithm that takes a vector layer and
-    creates a new identical one.
-
-    It is meant to be used as an example of how to create your own
-    algorithms and explain methods and variables used to do it. An
-    algorithm like this will be available in all elements, and there
-    is not need for additional work.
-
-    All Processing algorithms should extend the QgsProcessingAlgorithm
-    class.
-    """
+        This is an example algorithm that takes a vector layer and
+        creates a new identical one.
+        It is meant to be used as an example of how to create your own
+        algorithms and explain methods and variables used to do it. An
+        algorithm like this will be available in all elements, and there
+        is not need for additional work.
+        All Processing algorithms should extend the QgsProcessingAlgorithm
+        class.
+        """
 
     # Constants used to refer to parameters and outputs. They will be
     # used when calling the algorithm from another algorithm, or when
     # calling from the QGIS console.
 
-    OUTPUT = 'OUTPUT'
     INPUT = 'INPUT'
+    RES = 'RES'
+    OUTPUT = 'OUTPUT'
 
-    def initAlgorithm(self, config):
+    def tr(self, string):
         """
-        Here we define the inputs and output of the algorithm, along
-        with some other properties.
+        Returns a translatable string with the self.tr() function.
         """
+        return QCoreApplication.translate('Processing', string)
 
-        # We add the input vector features source. It can have any kind of
-        # geometry.
-        self.addParameter(
-            QgsProcessingParameterFeatureSource(
-                self.INPUT,
-                self.tr('Input layer'),
-                [QgsProcessing.TypeVectorAnyGeometry]
-            )
-        )
-
-        # We add a feature sink in which to store our processed features (this
-        # usually takes the form of a newly created vector layer when the
-        # algorithm is run in QGIS).
-        self.addParameter(
-            QgsProcessingParameterFeatureSink(
-                self.OUTPUT,
-                self.tr('Output layer')
-            )
-        )
-
-    def processAlgorithm(self, parameters, context, feedback):
-        """
-        Here is where the processing itself takes place.
-        """
-
-        # Retrieve the feature source and sink. The 'dest_id' variable is used
-        # to uniquely identify the feature sink, and must be included in the
-        # dictionary returned by the processAlgorithm function.
-        source = self.parameterAsSource(parameters, self.INPUT, context)
-        (sink, dest_id) = self.parameterAsSink(parameters, self.OUTPUT,
-                context, source.fields(), source.wkbType(), source.sourceCrs())
-
-        # Compute the number of steps to display within the progress bar and
-        # get features from source
-        total = 100.0 / source.featureCount() if source.featureCount() else 0
-        features = source.getFeatures()
-
-        for current, feature in enumerate(features):
-            # Stop the algorithm if cancel button has been clicked
-            if feedback.isCanceled():
-                break
-
-            # Add a feature in the sink
-            sink.addFeature(feature, QgsFeatureSink.FastInsert)
-
-            # Update the progress bar
-            feedback.setProgress(int(current * total))
-
-        # Return the results of the algorithm. In this case our only result is
-        # the feature sink which contains the processed features, but some
-        # algorithms may return multiple feature sinks, calculated numeric
-        # statistics, etc. These should all be included in the returned
-        # dictionary, with keys matching the feature corresponding parameter
-        # or output names.
-        return {self.OUTPUT: dest_id}
+    def createInstance(self):
+        return SpaceWidthAlgorithm()
 
     def name(self):
         """
@@ -129,14 +81,14 @@ class RasterSpaceAlgorithm(QgsProcessingAlgorithm):
         lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return 'Width'
+        return 'spacewidth'
 
     def displayName(self):
         """
         Returns the translated algorithm name, which should be used for any
         user-visible display of the algorithm name.
         """
-        return self.tr(self.name())
+        return self.tr('Space Width')
 
     def group(self):
         """
@@ -153,10 +105,85 @@ class RasterSpaceAlgorithm(QgsProcessingAlgorithm):
         contain lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return 'Raster analysis'
+        return ''
 
-    def tr(self, string):
-        return QCoreApplication.translate('Processing', string)
+    def shortHelpString(self):
+        """
+        Returns a localised short helper string for the algorithm. This string
+        should provide a basic description about what the algorithm does and the
+        parameters and outputs associated with it..
+        """
+        return self.tr("Estimates the free space at each pixel center using the maximum width approach")
 
-    def createInstance(self):
-        return RasterSpaceAlgorithm()
+    def initAlgorithm(self, config=None):
+        """
+        Here we define the inputs and output of the algorithm, along
+        with some other properties.
+        """
+
+        # We add the input vector features source. It can have any kind of
+        # geometry.
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.INPUT,
+                self.tr('Input layer'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.RES,
+                self.tr('Raster resolution, m'),
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=10,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterFileDestination(
+                self.OUTPUT,
+                self.tr('Output width raster')
+            )
+        )
+
+    def processAlgorithm(self, parameters, context, feedback):
+
+        source = self.parameterAsSource(parameters, self.INPUT, context)
+        res = self.parameterAsDouble(parameters, self.RES, context)
+        outwidth = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
+
+        PINF = -3.402823466e+38
+
+        ext = source.sourceExtent()
+        Xmin = ext.xMinimum() + res
+        Xmax = ext.xMaximum() - res
+        Ymin = ext.yMinimum() + res
+        Ymax = ext.yMaximum() - res
+        SizeX = Xmax - Xmin
+        SizeY = Ymax - Ymin
+        Nx = int(round(SizeX / res) + 1)
+        Ny = int(round(SizeY / res) + 1)
+        StepX = SizeX / (Nx - 1)
+        StepY = SizeY / (Ny - 1)
+
+        W = np.zeros((Nx, Ny), 'int')
+
+        W = np.rot90(W)
+        cols = W.shape[1]
+        rows = W.shape[0]
+        driver = gdal.GetDriverByName('GTiff')
+        outRaster = driver.Create(outwidth, cols, rows, 1, eType=gdal.GDT_Float32)
+        outband = outRaster.GetRasterBand(1)
+        outband.WriteArray(W)
+        outband.SetNoDataValue(PINF)
+        outRaster.SetGeoTransform((Xmin - StepX // 2, StepX, 0, Ymax + StepY // 2, 0, -StepY))
+        outRasterSRS = osr.SpatialReference()
+        srs = source.sourceCrs()
+        wkt = srs.toWkt()
+        outRasterSRS.ImportFromWkt(wkt)
+        outRaster.SetProjection(outRasterSRS.ExportToWkt())
+        outband.FlushCache()
+
+        return {self.OUTPUT: source}
+
