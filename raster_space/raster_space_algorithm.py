@@ -32,6 +32,7 @@ __revision__ = '$Format:%H$'
 
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (QgsProcessing,
+                       QgsMessageLog,
                        QgsFeatureSink,
                        QgsProcessingException,
                        QgsProcessingAlgorithm,
@@ -167,23 +168,33 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
         StepX = SizeX / (Nx - 1)
         StepY = SizeY / (Ny - 1)
 
-        W = np.zeros((Nx, Ny), 'int')
-
-        W = np.rot90(W)
-        cols = W.shape[1]
-        rows = W.shape[0]
-        driver = gdal.GetDriverByName('GTiff')
-        outRaster = driver.Create(outwidth, cols, rows, 1, eType=gdal.GDT_Float32)
-        outband = outRaster.GetRasterBand(1)
-        outband.WriteArray(W)
-        outband.SetNoDataValue(PINF)
-        outRaster.SetGeoTransform((Xmin - StepX // 2, StepX, 0, Ymax + StepY // 2, 0, -StepY))
+        # W = np.zeros((Nx, Ny), 'int')
+        #
+        # W = np.rot90(W)
+        # cols = W.shape[1]
+        # rows = W.shape[0]
+        # driver = gdal.GetDriverByName('GTiff')
+        # outRaster = driver.Create(outwidth, cols, rows, 1, eType=gdal.GDT_Float32)
+        # outband = outRaster.GetRasterBand(1)
+        # outband.WriteArray(W)
+        # outband.SetNoDataValue(PINF)
+        # outRaster.SetGeoTransform((Xmin - StepX // 2, StepX, 0, Ymax + StepY // 2, 0, -StepY))
         outRasterSRS = osr.SpatialReference()
         srs = source.sourceCrs()
         wkt = srs.toWkt()
         outRasterSRS.ImportFromWkt(wkt)
-        outRaster.SetProjection(outRasterSRS.ExportToWkt())
-        outband.FlushCache()
+        # outRaster.SetProjection(outRasterSRS.ExportToWkt())
+        # outband.FlushCache()
+
+        opts = gdal.RasterizeOptions(outputBounds = [Xmin, Ymin, Xmax, Ymax],
+                                     xRes = res, yRes = res, format = "GTiff", burnValues = [1], outputSRS=outRasterSRS)
+
+
+        QgsMessageLog.logMessage(outwidth)
+
+        QgsMessageLog.logMessage(source.sourceName())
+
+        gdal.Rasterize(outwidth, "/Users/tsamsonov/GitHub/raster-space/output/buildings.shp", options=opts)
 
         return {self.OUTPUT: source}
 
