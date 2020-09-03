@@ -44,6 +44,8 @@ from qgis.core import (QgsProcessing,
 import gdal, ogr, os, osr
 import numpy as np
 
+import WidthEstimator3 as WidthEstimator
+
 
 class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
     """
@@ -194,7 +196,64 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
 
         QgsMessageLog.logMessage(source.sourceName())
 
-        gdal.Rasterize(outwidth, "/Users/tsamsonov/GitHub/raster-space/output/buildings.shp", options=opts)
+        rasterized = "/Users/tsamsonov/GitHub/raster-space/rasterized.tif"
+        gdal.Rasterize(rasterized, "/Users/tsamsonov/GitHub/raster-space/output/buildings.shp", options=opts)
+
+        src_ds = gdal.Open(rasterized)
+        srcband = src_ds.GetRasterBand(1)
+
+        drv = gdal.GetDriverByName('GTiff')
+
+        outdist = '/Users/tsamsonov/GitHub/raster-space/dist.tif'
+        dst_ds = drv.Create('/Users/tsamsonov/GitHub/raster-space/dist.tif',
+                            src_ds.RasterXSize, src_ds.RasterYSize, 1,
+                            gdal.GetDataTypeByName('Float32'))
+
+        dst_ds.SetGeoTransform(src_ds.GetGeoTransform())
+        dst_ds.SetProjection(src_ds.GetProjectionRef())
+
+        dstband = dst_ds.GetRasterBand(1)
+
+        # In this example I'm using target pixel values of 100 and 300. I'm also using Distance units as GEO but you can change that to PIXELS.
+        gdal.ComputeProximity(srcband, dstband, ["DISTUNITS=GEO"])
+        dstband.FlushCache()
+
+        dist = gdal.Open(outdist)#.GetRasterBand(0)#.ReadAsArray()
+
+        if dist is None:
+            QgsMessageLog.logMessage('Unable to open ' + outwidth)
+        else:
+            QgsMessageLog.logMessage(str(dist.RasterCount))
+            npdist = np.array(dstband.ReadAsArray())
+
+            QgsMessageLog.logMessage(str(npdist.shape))
+
+            npwid = np.full(npdist.shape, 0)
+            QgsMessageLog.logMessage(str(npwid.shape))
+
+            nodata = -1
+
+            npres = WidthEstimator.estimate_width(npdist, npwid, StepX, nodata)
+            QgsMessageLog.logMessage(str(StepX))
+            QgsMessageLog.logMessage(str(np.min(npdist)))
+            QgsMessageLog.logMessage(str(np.max(npdist)))
+
+            QgsMessageLog.logMessage(WidthEstimator.__file__)
+
+            res = drv.Create(outwidth,
+                             src_ds.RasterXSize, src_ds.RasterYSize, 1,
+                             gdal.GetDataTypeByName('Float32'))
+
+            res.SetGeoTransform(src_ds.GetGeoTransform())
+            res.SetProjection(src_ds.GetProjectionRef())
+
+            outband = res.GetRasterBand(1)
+            outband.WriteArray(npres, 0, 0)
+            outband.FlushCache()
+            outband.SetNoDataValue(-1)
+
+            #
+            # QgsMessageLog.logMessage([Nx, Ny])
 
         return {self.OUTPUT: source}
 
