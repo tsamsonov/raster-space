@@ -170,23 +170,10 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
         StepX = SizeX / (Nx - 1)
         StepY = SizeY / (Ny - 1)
 
-        # W = np.zeros((Nx, Ny), 'int')
-        #
-        # W = np.rot90(W)
-        # cols = W.shape[1]
-        # rows = W.shape[0]
-        # driver = gdal.GetDriverByName('GTiff')
-        # outRaster = driver.Create(outwidth, cols, rows, 1, eType=gdal.GDT_Float32)
-        # outband = outRaster.GetRasterBand(1)
-        # outband.WriteArray(W)
-        # outband.SetNoDataValue(PINF)
-        # outRaster.SetGeoTransform((Xmin - StepX // 2, StepX, 0, Ymax + StepY // 2, 0, -StepY))
         outRasterSRS = osr.SpatialReference()
         srs = source.sourceCrs()
         wkt = srs.toWkt()
         outRasterSRS.ImportFromWkt(wkt)
-        # outRaster.SetProjection(outRasterSRS.ExportToWkt())
-        # outband.FlushCache()
 
         opts = gdal.RasterizeOptions(outputBounds = [Xmin, Ymin, Xmax, Ymax],
                                      xRes = res, yRes = res, format = "GTiff", burnValues = [1], outputSRS=outRasterSRS)
@@ -218,13 +205,14 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
         gdal.ComputeProximity(srcband, dstband, ["DISTUNITS=GEO"])
         dstband.FlushCache()
 
-        dist = gdal.Open(outdist)#.GetRasterBand(0)#.ReadAsArray()
+        dist = gdal.Open(outdist)
 
         if dist is None:
             QgsMessageLog.logMessage('Unable to open ' + outwidth)
         else:
             QgsMessageLog.logMessage(str(dist.RasterCount))
-            npdist = np.array(dstband.ReadAsArray())
+            # npdist = np.array(dstband.ReadAsArray())
+            npdist = np.array(srcband.ReadAsArray()) # length testing
 
             QgsMessageLog.logMessage(str(npdist.shape))
 
@@ -233,7 +221,8 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
 
             nodata = -1
 
-            npres = WidthEstimator.estimate_width(npdist, npwid, StepX, nodata)
+            # npres = WidthEstimator.estimate_width(npdist, npwid, StepX, nodata)
+            npres = WidthEstimator.estimate_length(npdist, npwid, StepX, nodata, 512, 1000)
             QgsMessageLog.logMessage(str(StepX))
             QgsMessageLog.logMessage(str(np.min(npdist)))
             QgsMessageLog.logMessage(str(np.max(npdist)))
@@ -251,9 +240,6 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
             outband.WriteArray(npres, 0, 0)
             outband.FlushCache()
             outband.SetNoDataValue(-1)
-
-            #
-            # QgsMessageLog.logMessage([Nx, Ny])
 
         return {self.OUTPUT: source}
 
