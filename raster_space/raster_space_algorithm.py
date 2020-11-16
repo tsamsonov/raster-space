@@ -385,7 +385,7 @@ class SpaceWidthAlgorithmRaster(QgsProcessingAlgorithm):
             nodata = -1
 
             npwid = rspace.estimate_width(npdist, npwid0, StepX, nodata)
-            nplen = np.array(rspace.estimate_length(npblocks, StepX, nodata, 512, 2000)).reshape((3, npdist.shape[0], npdist.shape[1]))
+            nplen = np.array(rspace.estimate_length(npblocks, StepX, nodata, 720, 12000)).reshape((3, npdist.shape[0], npdist.shape[1]))
 
             QgsMessageLog.logMessage(rspace.__file__)
 
