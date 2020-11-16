@@ -1,0 +1,1 @@
+/usr/bin/clang++ -Os -DNDEBUG -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX10.15.sdk -bundle -Wl,-headerpad_max_install_names -Xlinker -undefined -Xlinker dynamic_lookup -flto -o rspace.cpython-37m-darwin.so CMakeFiles/rspace.dir/rspace.cpp.o 

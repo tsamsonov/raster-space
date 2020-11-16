@@ -32,6 +32,7 @@ __revision__ = '$Format:%H$'
 
 from qgis.core import QgsProcessingProvider
 from .raster_space_algorithm import SpaceWidthAlgorithm
+from .raster_space_algorithm import SpaceWidthAlgorithmRaster
 
 
 class RasterSpaceProvider(QgsProcessingProvider):
@@ -41,8 +42,7 @@ class RasterSpaceProvider(QgsProcessingProvider):
         Loads all algorithms belonging to this provider.
         """
         self.addAlgorithm(SpaceWidthAlgorithm())
-        # add additional algorithms here
-        # self.addAlgorithm(MyOtherAlgorithm())
+        self.addAlgorithm(SpaceWidthAlgorithmRaster())
 
     def id(self):
         """

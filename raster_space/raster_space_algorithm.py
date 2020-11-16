@@ -38,13 +38,13 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingAlgorithm,
                        QgsProcessingParameterFileDestination,
                        QgsProcessingParameterNumber,
+                       QgsProcessingParameterRasterLayer,
                        QgsProcessingParameterFeatureSource,
                        QgsProcessingParameterFeatureSink)
 
 import gdal, ogr, os, osr
 import numpy as np
-
-import WidthEstimator3 as WidthEstimator
+import rspace
 
 
 class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
@@ -184,7 +184,7 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
         QgsMessageLog.logMessage(source.sourceName())
 
         rasterized = "/Users/tsamsonov/GitHub/raster-space/rasterized.tif"
-        gdal.Rasterize(rasterized, "/Users/tsamsonov/GitHub/raster-space/output/buildings.shp", options=opts)
+        gdal.Rasterize(rasterized, "/Users/tsamsonov/GitHub/raster-space/output/buildings_dem_s.shp", options=opts)
 
         src_ds = gdal.Open(rasterized)
         srcband = src_ds.GetRasterBand(1)
@@ -221,13 +221,13 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
 
             nodata = -1
 
-            # npres = WidthEstimator.estimate_width(npdist, npwid, StepX, nodata)
-            npres = WidthEstimator.estimate_length(npdist, npwid, StepX, nodata, 512, 1000)
+            # npres = rspace.estimate_width(npdist, npwid, StepX, nodata)
+            npres = rspace.estimate_length(npdist, npwid, StepX, nodata, 2048, 2000)
             QgsMessageLog.logMessage(str(StepX))
             QgsMessageLog.logMessage(str(np.min(npdist)))
             QgsMessageLog.logMessage(str(np.max(npdist)))
 
-            QgsMessageLog.logMessage(WidthEstimator.__file__)
+            QgsMessageLog.logMessage(rspace.__file__)
 
             res = drv.Create(outwidth,
                              src_ds.RasterXSize, src_ds.RasterYSize, 1,
@@ -238,6 +238,176 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
 
             outband = res.GetRasterBand(1)
             outband.WriteArray(npres, 0, 0)
+            outband.FlushCache()
+            outband.SetNoDataValue(-1)
+
+        return {self.OUTPUT: source}
+
+class SpaceWidthAlgorithmRaster(QgsProcessingAlgorithm):
+    """
+        This is an example algorithm that takes a vector layer and
+        creates a new identical one.
+        It is meant to be used as an example of how to create your own
+        algorithms and explain methods and variables used to do it. An
+        algorithm like this will be available in all elements, and there
+        is not need for additional work.
+        All Processing algorithms should extend the QgsProcessingAlgorithm
+        class.
+        """
+
+    # Constants used to refer to parameters and outputs. They will be
+    # used when calling the algorithm from another algorithm, or when
+    # calling from the QGIS console.
+
+    INPUT = 'INPUT'
+    OUTPUT = 'OUTPUT'
+
+    def tr(self, string):
+        """
+        Returns a translatable string with the self.tr() function.
+        """
+        return QCoreApplication.translate('Processing', string)
+
+    def createInstance(self):
+        return SpaceWidthAlgorithmRaster()
+
+    def name(self):
+        """
+        Returns the algorithm name, used for identifying the algorithm. This
+        string should be fixed for the algorithm, and must not be localised.
+        The name should be unique within each provider. Names should contain
+        lowercase alphanumeric characters only and no spaces or other
+        formatting characters.
+        """
+        return 'spacewidthraster'
+
+    def displayName(self):
+        """
+        Returns the translated algorithm name, which should be used for any
+        user-visible display of the algorithm name.
+        """
+        return self.tr('Space Width (raster)')
+
+    def group(self):
+        """
+        Returns the name of the group this algorithm belongs to. This string
+        should be localised.
+        """
+        return self.tr(self.groupId())
+
+    def groupId(self):
+        """
+        Returns the unique ID of the group this algorithm belongs to. This
+        string should be fixed for the algorithm, and must not be localised.
+        The group id should be unique within each provider. Group id should
+        contain lowercase alphanumeric characters only and no spaces or other
+        formatting characters.
+        """
+        return ''
+
+    def shortHelpString(self):
+        """
+        Returns a localised short helper string for the algorithm. This string
+        should provide a basic description about what the algorithm does and the
+        parameters and outputs associated with it..
+        """
+        return self.tr("Estimates the free space at each pixel center using the maximum width approach. Uses raster input")
+
+    def initAlgorithm(self, config=None):
+        """
+        Here we define the inputs and output of the algorithm, along
+        with some other properties.
+        """
+
+        # We add the input vector features source. It can have any kind of
+        # geometry.
+        self.addParameter(
+            QgsProcessingParameterRasterLayer(
+                self.INPUT,
+                self.tr('Input layer'),
+                [QgsProcessing.TypeRaster]
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterFileDestination(
+                self.OUTPUT,
+                self.tr('Output space raster')
+            )
+        )
+
+
+    def processAlgorithm(self, parameters, context, feedback):
+
+        source = self.parameterAsRasterLayer(parameters, self.INPUT, context)
+        output = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
+
+        PINF = -3.402823466e+38
+
+        outRasterSRS = osr.SpatialReference()
+        srs = source.crs()
+        wkt = srs.toWkt()
+        outRasterSRS.ImportFromWkt(wkt)
+
+        src_ds = gdal.Open(source.dataProvider().dataSourceUri())
+        srcband = src_ds.GetRasterBand(1)
+
+        StepX = src_ds.GetGeoTransform()[1]
+
+        drv = gdal.GetDriverByName('GTiff')
+
+        outdist = '/Users/tsamsonov/GitHub/raster-space/dist.tif'
+        dst_ds = drv.Create(outdist,
+                            src_ds.RasterXSize, src_ds.RasterYSize, 1,
+                            gdal.GetDataTypeByName('Float32'))
+
+        dst_ds.SetGeoTransform(src_ds.GetGeoTransform())
+        dst_ds.SetProjection(src_ds.GetProjectionRef())
+
+        dstband = dst_ds.GetRasterBand(1)
+
+        # In this example I'm using target pixel values of 100 and 300. I'm also using Distance units as GEO but you can change that to PIXELS.
+        gdal.ComputeProximity(srcband, dstband, ["DISTUNITS=GEO"])
+        dstband.FlushCache()
+
+        dist = gdal.Open(outdist)
+
+        if dist is None:
+            QgsMessageLog.logMessage('Unable to open ' + outdist)
+        else:
+            QgsMessageLog.logMessage(str(dist.RasterCount))
+            npblocks = np.array(srcband.ReadAsArray()) # length testing
+            npdist = np.array(dstband.ReadAsArray())  # length testing
+
+            npwid0 = np.full(npdist.shape, 0)
+            nplen0 = np.full(npdist.shape, 0)
+
+            nodata = -1
+
+            npwid = rspace.estimate_width(npdist, npwid0, StepX, nodata)
+            nplen = np.array(rspace.estimate_length(npblocks, StepX, nodata, 512, 2000)).reshape((3, npdist.shape[0], npdist.shape[1]))
+
+            QgsMessageLog.logMessage(rspace.__file__)
+
+            res = drv.Create(output,
+                             src_ds.RasterXSize, src_ds.RasterYSize, 4,
+                             gdal.GetDataTypeByName('Float32'))
+
+            res.SetGeoTransform(src_ds.GetGeoTransform())
+            res.SetProjection(src_ds.GetProjectionRef())
+
+            outband = res.GetRasterBand(1)
+            outband.WriteArray(npwid, 0, 0)
+
+            outband = res.GetRasterBand(2)
+            outband.WriteArray(nplen[0, :], 0, 0)
+
+            outband = res.GetRasterBand(3)
+            outband.WriteArray(nplen[1, :], 0, 0)
+
+            outband = res.GetRasterBand(4)
+            outband.WriteArray(nplen[2, :], 0, 0)
+
             outband.FlushCache()
             outband.SetNoDataValue(-1)
 
