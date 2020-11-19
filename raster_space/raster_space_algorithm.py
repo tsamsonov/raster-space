@@ -385,12 +385,12 @@ class SpaceWidthAlgorithmRaster(QgsProcessingAlgorithm):
             nodata = -1
 
             npwid = rspace.estimate_width(npdist, npwid0, StepX, nodata)
-            nplen = np.array(rspace.estimate_length(npblocks, StepX, nodata, 720, 12000)).reshape((3, npdist.shape[0], npdist.shape[1]))
+            nplen = np.array(rspace.estimate_length(npblocks, npwid, StepX, nodata, 720, 12000)).reshape((4, npdist.shape[0], npdist.shape[1]))
 
             QgsMessageLog.logMessage(rspace.__file__)
 
             res = drv.Create(output,
-                             src_ds.RasterXSize, src_ds.RasterYSize, 4,
+                             src_ds.RasterXSize, src_ds.RasterYSize, 5,
                              gdal.GetDataTypeByName('Float32'))
 
             res.SetGeoTransform(src_ds.GetGeoTransform())
@@ -407,6 +407,9 @@ class SpaceWidthAlgorithmRaster(QgsProcessingAlgorithm):
 
             outband = res.GetRasterBand(4)
             outband.WriteArray(nplen[2, :], 0, 0)
+
+            outband = res.GetRasterBand(5)
+            outband.WriteArray(nplen[3, :], 0, 0)
 
             outband.FlushCache()
             outband.SetNoDataValue(-1)

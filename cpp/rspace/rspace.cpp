@@ -98,7 +98,7 @@ bool is_within(int i, int j, int imax, int jmax) {
 }
 
 // Region length calculation
-std::vector<std::vector<double>> estimate_length(py::array_t<double> cobst,
+std::vector<std::vector<double>> estimate_length(py::array_t<double> cobst, py::array_t<double> cwidth,
                                     double cellsize, double nodata, int ndirs, double radius) {
 
     std::vector<Shifts> shifts;
@@ -115,6 +115,7 @@ std::vector<std::vector<double>> estimate_length(py::array_t<double> cobst,
     }
 
     auto buf_obst = cobst.request();
+    auto buf_width = cwidth.request();
 
 //    if (buf_obst.size != buf_length.size)
 //        throw std::runtime_error("Input shapes must match");
@@ -123,9 +124,9 @@ std::vector<std::vector<double>> estimate_length(py::array_t<double> cobst,
     auto ncol = buf_obst.shape[1];
 
     auto *obst = (double *) buf_obst.ptr;
-//       *length = (double *) buf_length.ptr;
+    auto *width = (double *) buf_width.ptr;
 
-    std::vector<std::vector<double>> output(3, std::vector<double>(nrow * ncol));
+    std::vector<std::vector<double>> output(4, std::vector<double>(nrow * ncol));
 
     int ndirs2 = ndirs / 2;
 
@@ -133,12 +134,18 @@ std::vector<std::vector<double>> estimate_length(py::array_t<double> cobst,
 
     std::vector<double> d1(ndirs2); // reusable vector;
     std::vector<double> d2(ndirs2); // reusable vector;
+
     std::vector<double> d12(ndirs2); // reusable vector;
+    std::vector<double> w12(ndirs2); // reusable vector;
+    std::vector<double> n12(ndirs2); // reusable vector;
 
     for (int i = 0; i < nrow; i++) {
         for (int j = 0; j < ncol; j++) {
 
             for (auto k = 0; k < ndirs2; k++) {
+                n12[k] = 1;
+                w12[k] = width[i * ncol + j];
+
                 d1[k] = r;
                 for (auto s: shifts[k]) {
                     ik = i + s.first;
@@ -147,11 +154,15 @@ std::vector<std::vector<double>> estimate_length(py::array_t<double> cobst,
                         if (obst[ik * ncol + jk] == 1) {
                             d1[k] = dist(s.first, s.second);
                             break;
+                        } else {
+                            w12[k] += width[ik * ncol + jk];
+                            n12[k]++;
                         }
                     } else {
                         d1[k] = dist(s.first, s.second);
                         break;
                     }
+
                 }
 
                 d2[k] = r;
@@ -162,6 +173,9 @@ std::vector<std::vector<double>> estimate_length(py::array_t<double> cobst,
                         if (obst[ik * ncol + jk] == 1) {
                             d2[k] = dist(s.first, s.second);
                             break;
+                        } else {
+                            w12[k] += width[ik * ncol + jk];
+                            n12[k]++;
                         }
                     } else {
                         d2[k] = dist(s.first, s.second);
@@ -179,9 +193,14 @@ std::vector<std::vector<double>> estimate_length(py::array_t<double> cobst,
             auto max_position = std::distance(d12.begin(), max_iterator);
             auto max_length = *max_iterator;
 
+//            auto max_iterator = std::max_element(w12.begin(), w12.end());
+//            auto max_position = std::distance(w12.begin(), max_iterator);
+//            auto max_length = d12[max_position];
+
             output[0][i * ncol + j] = max_length * cellsize;
             output[1][i * ncol + j] = 180 * angle * max_position / M_PI;
             output[2][i * ncol + j] = max_length > 0 ? d1[max_position] / max_length : 1;
+            output[3][i * ncol + j] = w12[max_position] / n12[max_position];
 
         }
     }
