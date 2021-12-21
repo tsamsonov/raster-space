@@ -1,0 +1,5 @@
+"/Users/tsamsonov/Library/Application Support/JetBrains/Toolbox/apps/CLion/ch-0/212.5457.51/CLion.app/Contents/bin/cmake/mac/bin/cmake" -DCMAKE_BUILD_TYPE=Release -DCMAKE_DEPENDS_USE_COMPILER=FALSE -G "CodeBlocks - Unix Makefiles" /Users/tsamsonov/GitHub/raster-space/cpp/rspace
+-- pybind11 v2.6.0 dev1
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /Users/tsamsonov/GitHub/raster-space/cpp/rspace/cmake-build-release

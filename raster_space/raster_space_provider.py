@@ -31,8 +31,11 @@ __copyright__ = '(C) 2019 by Timofey Samsonov, Lomonosov MSU Faculty of Geograph
 __revision__ = '$Format:%H$'
 
 from qgis.core import QgsProcessingProvider
-from .raster_space_algorithm import SpaceWidthAlgorithm
+from .raster_space_algorithm import SpaceWidthAlgorithmVector
 from .raster_space_algorithm import SpaceWidthAlgorithmRaster
+from .raster_space_algorithm import SpaceWidthAlgorithmUrban
+from .raster_space_algorithm import DEMGranularityAlgorithm
+from .raster_space_algorithm import CurvatureFilteringAlgorithm
 
 
 class RasterSpaceProvider(QgsProcessingProvider):
@@ -41,8 +44,11 @@ class RasterSpaceProvider(QgsProcessingProvider):
         """
         Loads all algorithms belonging to this provider.
         """
-        self.addAlgorithm(SpaceWidthAlgorithm())
+        self.addAlgorithm(SpaceWidthAlgorithmVector())
         self.addAlgorithm(SpaceWidthAlgorithmRaster())
+        self.addAlgorithm(SpaceWidthAlgorithmUrban())
+        self.addAlgorithm(DEMGranularityAlgorithm())
+        self.addAlgorithm(CurvatureFilteringAlgorithm())
 
     def id(self):
         """

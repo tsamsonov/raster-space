@@ -1,0 +1,5 @@
+/Users/tsamsonov/GitHub/raster-space/cpp/rspace/cmake-build-debug/CMakeFiles/rebuild_cache.dir
+/Users/tsamsonov/GitHub/raster-space/cpp/rspace/cmake-build-debug/CMakeFiles/edit_cache.dir
+/Users/tsamsonov/GitHub/raster-space/cpp/rspace/cmake-build-debug/CMakeFiles/rspace.dir
+/Users/tsamsonov/GitHub/raster-space/cpp/rspace/cmake-build-debug/pybind11/CMakeFiles/rebuild_cache.dir
+/Users/tsamsonov/GitHub/raster-space/cpp/rspace/cmake-build-debug/pybind11/CMakeFiles/edit_cache.dir

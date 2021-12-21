@@ -30,6 +30,8 @@ __copyright__ = '(C) 2019 by Timofey Samsonov, Lomonosov MSU Faculty of Geograph
 
 __revision__ = '$Format:%H$'
 
+import math
+
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (QgsProcessing,
                        QgsMessageLog,
@@ -37,34 +39,37 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingException,
                        QgsProcessingAlgorithm,
                        QgsProcessingParameterFileDestination,
+                       QgsProcessingParameterRasterDestination,
                        QgsProcessingParameterNumber,
                        QgsProcessingParameterRasterLayer,
+                       QgsProcessingParameterVectorLayer,
+                       QgsRasterLayer,
                        QgsProcessingParameterFeatureSource,
                        QgsProcessingParameterFeatureSink)
 
-import gdal, ogr, os, osr
+from osgeo import gdal, ogr, osr
 import numpy as np
+import os, sys
 import rspace
+from .scratch import CreateScratchFolder
+from qgis import processing
+from .WBT.whitebox_tools import WhiteboxTools
 
+def npread(path):
+    file = gdal.Open(path)
+    bnd = file.GetRasterBand(1)
+    return np.array(bnd.ReadAsArray())
 
-class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
-    """
-        This is an example algorithm that takes a vector layer and
-        creates a new identical one.
-        It is meant to be used as an example of how to create your own
-        algorithms and explain methods and variables used to do it. An
-        algorithm like this will be available in all elements, and there
-        is not need for additional work.
-        All Processing algorithms should extend the QgsProcessingAlgorithm
-        class.
-        """
-
-    # Constants used to refer to parameters and outputs. They will be
-    # used when calling the algorithm from another algorithm, or when
-    # calling from the QGIS console.
+class CurvatureFilteringAlgorithm(QgsProcessingAlgorithm):
 
     INPUT = 'INPUT'
-    RES = 'RES'
+    EXXAG = 'EXXAG'
+    DEEPEN = 'DEEPEN'
+    SIZE_ELEV = 'SIZE_ELEV'
+    ITERATIONS_ELEV = 'ITERATIONS_ELEV'
+    MIN_SLOPE = 'MIN_SLOPE'
+    SIZE_SLOPE = 'SIZE_SLOPE'
+    ITERATIONS_SLOPE = 'ITERATIONS_SLOPE'
     OUTPUT = 'OUTPUT'
 
     def tr(self, string):
@@ -74,7 +79,7 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate('Processing', string)
 
     def createInstance(self):
-        return SpaceWidthAlgorithm()
+        return CurvatureFilteringAlgorithm()
 
     def name(self):
         """
@@ -84,14 +89,14 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
         lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return 'spacewidth'
+        return 'curvfiltering'
 
     def displayName(self):
         """
         Returns the translated algorithm name, which should be used for any
         user-visible display of the algorithm name.
         """
-        return self.tr('Space Width')
+        return self.tr('DEM Curvature Filtering')
 
     def group(self):
         """
@@ -116,7 +121,7 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
         should provide a basic description about what the algorithm does and the
         parameters and outputs associated with it..
         """
-        return self.tr("Estimates the free space at each pixel center using the maximum width approach")
+        return self.tr("Performs curvature-based DEM filtering to produce DEM for ")
 
     def initAlgorithm(self, config=None):
         """
@@ -127,137 +132,288 @@ class SpaceWidthAlgorithm(QgsProcessingAlgorithm):
         # We add the input vector features source. It can have any kind of
         # geometry.
         self.addParameter(
-            QgsProcessingParameterFeatureSource(
+            QgsProcessingParameterRasterLayer(
                 self.INPUT,
-                self.tr('Input layer'),
-                [QgsProcessing.TypeVectorAnyGeometry]
+                self.tr('Input raster DEM')
             )
         )
 
         self.addParameter(
             QgsProcessingParameterNumber(
-                self.RES,
-                self.tr('Raster resolution, m'),
+                self.EXXAG,
+                self.tr('Exxageration ratio for mountains'),
                 type=QgsProcessingParameterNumber.Double,
-                defaultValue=10,
+                defaultValue=1.25,
             )
         )
 
         self.addParameter(
-            QgsProcessingParameterFileDestination(
-                self.OUTPUT,
-                self.tr('Output width raster')
+            QgsProcessingParameterNumber(
+                self.DEEPEN,
+                self.tr('Deepening ratio for lowlands'),
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=0.4,
             )
         )
 
-    def processAlgorithm(self, parameters, context, feedback):
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.SIZE_ELEV,
+                self.tr('Standard deviation (in cells) to filter elevation'),
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=1,
+            )
+        )
 
-        source = self.parameterAsSource(parameters, self.INPUT, context)
-        res = self.parameterAsDouble(parameters, self.RES, context)
-        outwidth = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.ITERATIONS_ELEV,
+                self.tr('Number of iterations to filter elevation'),
+                type=QgsProcessingParameterNumber.Integer,
+                defaultValue=5,
+            )
+        )
 
-        PINF = -3.402823466e+38
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.MIN_SLOPE,
+                self.tr('Minimum slope (in degrees) to separate mountains from plains'),
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=5,
+            )
+        )
 
-        ext = source.sourceExtent()
-        Xmin = ext.xMinimum() + res
-        Xmax = ext.xMaximum() - res
-        Ymin = ext.yMinimum() + res
-        Ymax = ext.yMaximum() - res
-        SizeX = Xmax - Xmin
-        SizeY = Ymax - Ymin
-        Nx = int(round(SizeX / res) + 1)
-        Ny = int(round(SizeY / res) + 1)
-        StepX = SizeX / (Nx - 1)
-        StepY = SizeY / (Ny - 1)
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.SIZE_SLOPE,
+                self.tr('Standard deviation (in cells) to filter slopes'),
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=1,
+            )
+        )
 
-        outRasterSRS = osr.SpatialReference()
-        srs = source.sourceCrs()
-        wkt = srs.toWkt()
-        outRasterSRS.ImportFromWkt(wkt)
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.ITERATIONS_SLOPE,
+                self.tr('Number of iterations to filter slope'),
+                type=QgsProcessingParameterNumber.Integer,
+                defaultValue=5,
+            )
+        )
 
-        opts = gdal.RasterizeOptions(outputBounds = [Xmin, Ymin, Xmax, Ymax],
-                                     xRes = res, yRes = res, format = "GTiff", burnValues = [1], outputSRS=outRasterSRS)
+        self.addParameter(
+            QgsProcessingParameterRasterDestination(
+                self.OUTPUT,
+                self.tr('Output filtered raster DEM')
+            )
+        )
 
+    def execute(self, input_path, output_path, exxag, deepen, size_elev, iter_elev,
+                min_slope, size_slope, iter_slope, feedback, scratch=None):
 
-        QgsMessageLog.logMessage(outwidth)
+        if scratch is None:
+            scratch = CreateScratchFolder(os.path.dirname(input_path))
 
-        QgsMessageLog.logMessage(source.sourceName())
+        wbt = WhiteboxTools()
+        wbt.set_whitebox_dir(os.path.dirname(os.path.realpath(__file__)) + '/WBT')
+        wbt.set_working_dir(scratch)
+        wbt.set_verbose_mode(True)
 
-        rasterized = "/Users/tsamsonov/GitHub/raster-space/rasterized.tif"
-        gdal.Rasterize(rasterized, "/Users/tsamsonov/GitHub/raster-space/output/buildings_dem_s.shp", options=opts)
+        dem_cur = input_path
+        for i in range(iter_elev):
+            filtered = f"{scratch}/filtered_{i+1}.tif"
+            wbt.gaussian_filter(dem_cur, filtered, size_elev, callback = feedback.pushInfo)
+            dem_cur = filtered
 
-        src_ds = gdal.Open(rasterized)
-        srcband = src_ds.GetRasterBand(1)
+        slope = f"{scratch}/slope.tif"
+        wbt.slope(dem_cur, slope, callback = feedback.pushInfo)
+
+        mask_cur = f"{scratch}/mask.tif"
+        wbt.greater_than(slope, min_slope, mask_cur, callback = feedback.pushInfo)
+
+        for i in range(iter_slope):
+            filtered = f"{scratch}/mask_{i+1}.tif"
+            wbt.gaussian_filter(mask_cur, filtered, size_slope, callback = feedback.pushInfo)
+            mask_cur = filtered
+
+        curv_plan_saga = f"{scratch}/curv_plan.sdat"
+        curv_mini_saga = f"{scratch}/curv_mini.sdat"
+        curv_maxi_saga = f"{scratch}/curv_maxi.sdat"
+
+        processing.run("saga:slopeaspectcurvature", {
+            'ELEVATION': dem_cur,
+            'METHOD': 3,
+            'C_PLAN': curv_plan_saga,
+            'C_MINI': curv_mini_saga,
+            'C_MAXI': curv_maxi_saga,
+            'SLOPE': f"{scratch}/saga_slope.sdat",
+            'ASPECT': f"{scratch}/saga_aspect.sdat",
+            'C_GENE': f"{scratch}/saga_cgene.sdat",
+            'C_PROF': f"{scratch}/saga_cprof.sdat",
+            'C_TANG': f"{scratch}/saga_ctang.sdat",
+            'C_LONG': f"{scratch}/saga_clong.sdat",
+            'C_CROS': f"{scratch}/saga_ccros.sdat",
+            'C_TOTA': f"{scratch}/saga_ctota.sdat",
+            'C_ROTO': f"{scratch}/saga_croto.sdat"
+        })
+
+        curv_plan = f"{scratch}/curv_plan.tif"
+        curv_mini = f"{scratch}/curv_mini.tif"
+        curv_maxi = f"{scratch}/curv_maxi.tif"
+
+        processing.run("gdal:translate", {
+            'INPUT': curv_plan_saga,
+            'OUTPUT': curv_plan
+        })
+
+        processing.run("gdal:translate", {
+            'INPUT': curv_mini_saga,
+            'OUTPUT': curv_mini
+        })
+
+        processing.run("gdal:translate", {
+            'INPUT': curv_maxi_saga,
+            'OUTPUT': curv_maxi
+        })
+
+        dem_warped = dem_cur
+        # dem_warped = f"{scratch}/dem_warped.tif"
+        #
+        # processing.run("gdal:warpreproject", {
+        #     'INPUT': dem_cur,
+        #     'SOURCE_CRS': curv_plan,
+        #     'TARGET_CRS': curv_plan,
+        #     'TARGET_EXTENT': curv_plan,
+        #     'RESAMPLING': 0,
+        #     'OUTPUT': dem_warped
+        # })
+
+        mask_warped = mask_cur
+
+        # mask_warped = f"{scratch}/mask_warped.tif"
+        #
+        # processing.run("gdal:warpreproject", {
+        #     'INPUT': mask_cur,
+        #     'SOURCE_CRS': curv_plan,
+        #     'TARGET_CRS': curv_plan,
+        #     'TARGET_EXTENT': curv_plan,
+        #     'RESAMPLING': 0,
+        #     'OUTPUT': mask_warped
+        # })
+
+        #
+        # processing.run("gdal:warpreproject", {
+        #     'INPUT': curv_mini_saga,
+        #     'SOURCE_CRS': dem_cur,
+        #     'TARGET_CRS': dem_cur,
+        #     'TARGET_EXTENT': dem_cur,
+        #     'RESAMPLING': 0,
+        #     'OUTPUT': curv_plan
+        # })
+        #
+        # processing.run("gdal:warpreproject", {
+        #     'INPUT': curv_maxi_saga,
+        #     'SOURCE_CRS': dem_cur,
+        #     'TARGET_CRS': dem_cur,
+        #     'TARGET_EXTENT': dem_cur,
+        #     'RESAMPLING': 0,
+        #     'OUTPUT': curv_maxi
+        # })
+
+        curv_plan_01 = f"{scratch}/curv_plan_01.tif"
+        curv_mini_01 = f"{scratch}/curv_mini_01.tif"
+        curv_maxi_01 = f"{scratch}/curv_maxi_01.tif"
+
+        wbt.rescale_value_range(curv_plan, curv_plan_01, 0, 0.5, callback = feedback.pushInfo)
+        wbt.rescale_value_range(curv_maxi, curv_maxi_01, 0, 0.5, callback = feedback.pushInfo)
+        # wbt.rescale_value_range(curv_maxi, curv_maxi_01, 0, 1, callback = feedback.pushInfo)
+        wbt.rescale_value_range(curv_mini, curv_mini_01, 0, 1, callback = feedback.pushInfo)
+
+        ridges_int = f"{scratch}/ridges_int.tif"
+        wbt.find_ridges(dem_warped, ridges_int)
+
+        ridges_zero = f"{scratch}/ridges_zero.tif"
+        wbt.convert_nodata_to_zero(ridges_int, ridges_zero)
+
+        ridges = ridges_zero
+
+        # ridges = f"{scratch}/ridges.tif"
+        #
+        # processing.run("gdal:warpreproject", {
+        #     'INPUT': ridges_zero,
+        #     'SOURCE_CRS': ridges_zero,
+        #     'TARGET_CRS': ridges_zero,
+        #     'TARGET_EXTENT': ridges_zero,
+        #     'RESAMPLING': 0,
+        #     'DATA_TYPE': 6,
+        #     'OUTPUT': ridges
+        # })
+
+        ridges_perc = f"{scratch}/ridges_perc.tif"
+        wbt.gaussian_filter(ridges, ridges_perc, size_slope)
+
+        ridges_weight = f"{scratch}/ridges_weight.tif"
+        wbt.rescale_value_range(ridges_perc, ridges_weight, 0, 1)
+
+        npdem = npread(dem_warped).astype(np.float32)
+        npcurvplan = npread(curv_plan_01)
+        npcurvmini = npread(curv_mini_01)
+        npcurvmaxi = npread(curv_maxi_01)
+        npmask = npread(mask_warped)
+        nprw = npread(ridges_weight)
+
+        feedback.pushInfo('DEM minimum: ' + str(np.min(npdem)))
+
+        file = gdal.Open(dem_warped)
+        bnd = file.GetRasterBand(1)
+        nodata = bnd.GetNoDataValue()
+
+        npdem[npdem == nodata] = np.nan
+        znorm = npdem - np.nanmin(npdem)
+
+        npmount = exxag * znorm * (npcurvplan + npcurvmaxi) * nprw + (1 - (npcurvplan + npcurvmaxi) * nprw) * znorm
+        # npmount = exxag * znorm * npcurvmaxi + (1 - npcurvmaxi) * znorm
+        nplow = deepen * znorm * (1 - npcurvmini) + npcurvmini * znorm
+        npres = npmount * npmask + (1 - npmask) * nplow
 
         drv = gdal.GetDriverByName('GTiff')
+        input_gdal = gdal.Open(dem_warped)
 
-        outdist = '/Users/tsamsonov/GitHub/raster-space/dist.tif'
-        dst_ds = drv.Create('/Users/tsamsonov/GitHub/raster-space/dist.tif',
-                            src_ds.RasterXSize, src_ds.RasterYSize, 1,
-                            gdal.GetDataTypeByName('Float32'))
-
-        dst_ds.SetGeoTransform(src_ds.GetGeoTransform())
-        dst_ds.SetProjection(src_ds.GetProjectionRef())
+        dst_ds = drv.Create(output_path,
+                            input_gdal.RasterXSize, input_gdal.RasterYSize, 1,
+                            gdal.GetDataTypeByName('Int16'))
+        gt = input_gdal.GetGeoTransform()
+        prj = input_gdal.GetProjectionRef()
+        dst_ds.SetGeoTransform(gt)
+        dst_ds.SetProjection(prj)
 
         dstband = dst_ds.GetRasterBand(1)
-
-        # In this example I'm using target pixel values of 100 and 300. I'm also using Distance units as GEO but you can change that to PIXELS.
-        gdal.ComputeProximity(srcband, dstband, ["DISTUNITS=GEO"])
+        dstband.SetNoDataValue(nodata)
+        dstband.WriteArray(npres.astype(np.int16), 0, 0)
         dstband.FlushCache()
 
-        dist = gdal.Open(outdist)
+        return
 
-        if dist is None:
-            QgsMessageLog.logMessage('Unable to open ' + outwidth)
-        else:
-            QgsMessageLog.logMessage(str(dist.RasterCount))
-            # npdist = np.array(dstband.ReadAsArray())
-            npdist = np.array(srcband.ReadAsArray()) # length testing
+    def processAlgorithm(self, parameters, context, feedback):
 
-            QgsMessageLog.logMessage(str(npdist.shape))
+        input = self.parameterAsRasterLayer(parameters, self.INPUT, context)
+        exxag = self.parameterAsDouble(parameters, self.EXXAG, context)
+        deepen = self.parameterAsDouble(parameters, self.DEEPEN, context)
+        size_elev = self.parameterAsDouble(parameters, self.SIZE_ELEV, context)
+        iter_elev = self.parameterAsInt(parameters, self.ITERATIONS_ELEV, context)
+        min_slope = self.parameterAsDouble(parameters, self.MIN_SLOPE, context)
+        size_slope = self.parameterAsDouble(parameters, self.SIZE_SLOPE, context)
+        iter_slope = self.parameterAsInt(parameters, self.ITERATIONS_SLOPE, context)
+        output = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
 
-            npwid = np.full(npdist.shape, 0)
-            QgsMessageLog.logMessage(str(npwid.shape))
+        scratch = CreateScratchFolder(os.path.dirname(input.dataProvider().dataSourceUri()))
 
-            nodata = -1
+        self.execute(input.dataProvider().dataSourceUri(), output,
+                     exxag, deepen, size_elev, iter_elev, min_slope, size_slope, iter_slope, feedback, scratch)
 
-            # npres = rspace.estimate_width(npdist, npwid, StepX, nodata)
-            npres = rspace.estimate_length(npdist, npwid, StepX, nodata, 2048, 2000)
-            QgsMessageLog.logMessage(str(StepX))
-            QgsMessageLog.logMessage(str(np.min(npdist)))
-            QgsMessageLog.logMessage(str(np.max(npdist)))
-
-            QgsMessageLog.logMessage(rspace.__file__)
-
-            res = drv.Create(outwidth,
-                             src_ds.RasterXSize, src_ds.RasterYSize, 1,
-                             gdal.GetDataTypeByName('Float32'))
-
-            res.SetGeoTransform(src_ds.GetGeoTransform())
-            res.SetProjection(src_ds.GetProjectionRef())
-
-            outband = res.GetRasterBand(1)
-            outband.WriteArray(npres, 0, 0)
-            outband.FlushCache()
-            outband.SetNoDataValue(-1)
-
-        return {self.OUTPUT: source}
+        return {self.OUTPUT: output}
 
 class SpaceWidthAlgorithmRaster(QgsProcessingAlgorithm):
-    """
-        This is an example algorithm that takes a vector layer and
-        creates a new identical one.
-        It is meant to be used as an example of how to create your own
-        algorithms and explain methods and variables used to do it. An
-        algorithm like this will be available in all elements, and there
-        is not need for additional work.
-        All Processing algorithms should extend the QgsProcessingAlgorithm
-        class.
-        """
-
-    # Constants used to refer to parameters and outputs. They will be
-    # used when calling the algorithm from another algorithm, or when
-    # calling from the QGIS console.
 
     INPUT = 'INPUT'
     OUTPUT = 'OUTPUT'
@@ -311,7 +467,7 @@ class SpaceWidthAlgorithmRaster(QgsProcessingAlgorithm):
         should provide a basic description about what the algorithm does and the
         parameters and outputs associated with it..
         """
-        return self.tr("Estimates the free space at each pixel center using the maximum width approach. Uses raster input")
+        return self.tr("Estimates the free space at each pixel center using the maximum width approach")
 
     def initAlgorithm(self, config=None):
         """
@@ -324,95 +480,682 @@ class SpaceWidthAlgorithmRaster(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterRasterLayer(
                 self.INPUT,
-                self.tr('Input layer'),
+                self.tr('Input obstacles raster layer')
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterRasterDestination(
+                self.OUTPUT,
+                self.tr('Output width raster')
+            )
+        )
+
+    def execute(self, input_path, output_path, feedback, scratch=None, heights=None):
+        input_gdal = gdal.Open(input_path)
+        input_band = input_gdal.GetRasterBand(1)
+
+        drv = gdal.GetDriverByName('GTiff')
+
+        nbands = 2
+        if scratch is None:
+            scratch = CreateScratchFolder(os.path.dirname(input_path))
+            nbands = 1
+
+        outdist = f"{scratch}/dist.tif"
+
+        feedback.pushInfo(outdist)
+
+        dst_ds = drv.Create(outdist,
+                            input_gdal.RasterXSize, input_gdal.RasterYSize, 1,
+                            gdal.GetDataTypeByName('Float32'))
+
+        gt = input_gdal.GetGeoTransform()
+        prj = input_gdal.GetProjectionRef()
+
+        dst_ds.SetGeoTransform(gt)
+        dst_ds.SetProjection(prj)
+
+        dstband = dst_ds.GetRasterBand(1)
+
+        gdal.ComputeProximity(input_band, dstband, ["DISTUNITS=GEO"])
+        dstband.FlushCache()
+
+        dist = gdal.Open(outdist)
+
+        if dist is None:
+            res0 = None
+            QgsMessageLog.logMessage('Unable to open ' + outdist)
+        else:
+
+            npdist = np.array(dstband.ReadAsArray())
+
+            maxval = np.max(npdist)
+
+            feedback.pushInfo('MAX DISTANCE: ' + str(maxval))
+
+            if (maxval == 0):
+                res0 = None
+                feedback.pushInfo('OOPS')
+            else:
+                if (heights is None):
+                    heights = np.full(npdist.shape, 0)
+
+                nodata = -1
+
+                res0 = rspace.estimate_width(npdist, heights, gt[1], nodata)
+                npres = np.reshape(np.array(res0[0]), npdist.shape)
+
+                feedback.pushInfo('WIDTH MEDIAN: ' + str(np.median(npres)))
+                feedback.pushInfo('WIDTH IQR: ' + str(np.quantile(npres, 0.25)) + ' - ' + str(np.quantile(npres, 0.75)))
+
+
+                res = drv.Create(output_path,
+                                 input_gdal.RasterXSize, input_gdal.RasterYSize, nbands,
+                                 gdal.GetDataTypeByName('Float32'))
+
+                res.SetGeoTransform(gt)
+                res.SetProjection(prj)
+
+                outband = res.GetRasterBand(1)
+                outband.WriteArray(npres, 0, 0)
+                outband.FlushCache()
+                outband.SetNoDataValue(-1)
+
+                nprop = np.reshape(np.array(res0[1]), npdist.shape)
+
+                if (nbands == 2):
+                    outband = res.GetRasterBand(2)
+                    outband.WriteArray(nprop, 0, 0)
+                    outband.FlushCache()
+                    outband.SetNoDataValue(-1)
+
+                outheight = f"{scratch}/propheights.tif"
+
+                prop = drv.Create(outheight,
+                                 input_gdal.RasterXSize, input_gdal.RasterYSize, 1,
+                                 gdal.GetDataTypeByName('Float32'))
+
+                prop.SetGeoTransform(gt)
+                prop.SetProjection(prj)
+
+                propband = prop.GetRasterBand(1)
+                propband.WriteArray(nprop, 0, 0)
+                propband.FlushCache()
+                propband.SetNoDataValue(-1)
+
+        return res0
+
+    def processAlgorithm(self, parameters, context, feedback):
+
+        input = self.parameterAsRasterLayer(parameters, self.INPUT, context)
+        output = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
+
+        scratch = CreateScratchFolder(os.path.dirname(input.dataProvider().dataSourceUri()))
+
+        self.execute(input.dataProvider().dataSourceUri(), output, feedback, scratch)
+
+        return {self.OUTPUT: output}
+
+class SpaceWidthAlgorithmVector(QgsProcessingAlgorithm):
+
+    INPUT = 'INPUT'
+    RES = 'RES'
+    OUTPUT = 'OUTPUT'
+
+    def tr(self, string):
+        """
+        Returns a translatable string with the self.tr() function.
+        """
+        return QCoreApplication.translate('Processing', string)
+
+    def createInstance(self):
+        return SpaceWidthAlgorithmVector()
+
+    def name(self):
+        """
+        Returns the algorithm name, used for identifying the algorithm. This
+        string should be fixed for the algorithm, and must not be localised.
+        The name should be unique within each provider. Names should contain
+        lowercase alphanumeric characters only and no spaces or other
+        formatting characters.
+        """
+        return 'spacewidthvector'
+
+    def displayName(self):
+        """
+        Returns the translated algorithm name, which should be used for any
+        user-visible display of the algorithm name.
+        """
+        return self.tr('Space Width (vector)')
+
+    def group(self):
+        """
+        Returns the name of the group this algorithm belongs to. This string
+        should be localised.
+        """
+        return self.tr(self.groupId())
+
+    def groupId(self):
+        """
+        Returns the unique ID of the group this algorithm belongs to. This
+        string should be fixed for the algorithm, and must not be localised.
+        The group id should be unique within each provider. Group id should
+        contain lowercase alphanumeric characters only and no spaces or other
+        formatting characters.
+        """
+        return ''
+
+    def shortHelpString(self):
+        """
+        Returns a localised short helper string for the algorithm. This string
+        should provide a basic description about what the algorithm does and the
+        parameters and outputs associated with it..
+        """
+        return self.tr("Estimates the free space at each pixel center using the maximum width approach")
+
+    def initAlgorithm(self, config=None):
+        """
+        Here we define the inputs and output of the algorithm, along
+        with some other properties.
+        """
+
+        # We add the input vector features source. It can have any kind of
+        # geometry.
+        self.addParameter(
+            QgsProcessingParameterVectorLayer(
+                self.INPUT,
+                self.tr('Input obstacles vector layer'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.RES,
+                self.tr('Raster resolution, m'),
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=10,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterRasterDestination(
+                self.OUTPUT,
+                self.tr('Output width raster')
+            )
+        )
+
+    def execute(self, input, output, res, feedback, scratch=None):
+        PINF = -3.402823466e+38
+
+        ext = input.sourceExtent()
+        Xmin = ext.xMinimum() + res
+        Xmax = ext.xMaximum() - res
+        Ymin = ext.yMinimum() + res
+        Ymax = ext.yMaximum() - res
+
+        outRasterSRS = osr.SpatialReference()
+        srs = input.sourceCrs()
+        wkt = srs.toWkt()
+        outRasterSRS.ImportFromWkt(wkt)
+
+        opts = gdal.RasterizeOptions(outputBounds=[Xmin, Ymin, Xmax, Ymax],
+                                     xRes=res, yRes=res, format="GTiff", burnValues=[1], outputSRS=outRasterSRS)
+
+        if scratch is None:
+            scratch = CreateScratchFolder(os.path.dirname(input.dataProvider().dataSourceUri()))
+
+        rasterized = f"{scratch}/rasterized.tif"
+
+        feedback.pushInfo(rasterized)
+
+        gdal.Rasterize(rasterized, input.dataProvider().dataSourceUri(), options=opts)
+
+        swar = SpaceWidthAlgorithmRaster()
+
+        swar.execute(rasterized, output, feedback, scratch)
+
+        return
+
+    def processAlgorithm(self, parameters, context, feedback):
+
+        input = self.parameterAsVectorLayer(parameters, self.INPUT, context)
+        res = self.parameterAsDouble(parameters, self.RES, context)
+        output = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
+
+        scratch = CreateScratchFolder(os.path.dirname(input.dataProvider().dataSourceUri()))
+
+        self.execute(input, output, res, feedback, scratch)
+
+        return {self.OUTPUT: output}
+
+class DEMGranularityAlgorithm(QgsProcessingAlgorithm):
+
+    INPUT = 'INPUT'
+    OUTPUT = 'OUTPUT'
+
+    def tr(self, string):
+        """
+        Returns a translatable string with the self.tr() function.
+        """
+        return QCoreApplication.translate('Processing', string)
+
+    def createInstance(self):
+        return DEMGranularityAlgorithm()
+
+    def name(self):
+        """
+        Returns the algorithm name, used for identifying the algorithm. This
+        string should be fixed for the algorithm, and must not be localised.
+        The name should be unique within each provider. Names should contain
+        lowercase alphanumeric characters only and no spaces or other
+        formatting characters.
+        """
+        return 'demgranularity'
+
+    def displayName(self):
+        """
+        Returns the translated algorithm name, which should be used for any
+        user-visible display of the algorithm name.
+        """
+        return self.tr('Raster DEM Granularity')
+
+    def group(self):
+        """
+        Returns the name of the group this algorithm belongs to. This string
+        should be localised.
+        """
+        return self.tr(self.groupId())
+
+    def groupId(self):
+        """
+        Returns the unique ID of the group this algorithm belongs to. This
+        string should be fixed for the algorithm, and must not be localised.
+        The group id should be unique within each provider. Group id should
+        contain lowercase alphanumeric characters only and no spaces or other
+        formatting characters.
+        """
+        return ''
+
+    def shortHelpString(self):
+        """
+        Returns a localised short helper string for the algorithm. This string
+        should provide a basic description about what the algorithm does and the
+        parameters and outputs associated with it..
+        """
+        return self.tr("Estimates the granularity of raster DEM as width of a space between surface-specific points")
+
+    def initAlgorithm(self, config=None):
+        """
+        Here we define the inputs and output of the algorithm, along
+        with some other properties.
+        """
+
+        # We add the input vector features source. It can have any kind of
+        # geometry.
+        self.addParameter(
+            QgsProcessingParameterRasterLayer(
+                self.INPUT,
+                self.tr('Input raster DEM')
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterRasterDestination(
+                self.OUTPUT,
+                self.tr('Output granularity raster')
+            )
+        )
+
+    def execute(self, input_path, output_path, feedback, scratch=None):
+
+        if scratch is None:
+            scratch = CreateScratchFolder(os.path.dirname(input_path))
+
+        wbt = WhiteboxTools()
+        wbt.set_whitebox_dir(os.path.dirname(os.path.realpath(__file__)) + '/WBT')
+        wbt.set_working_dir(scratch)
+        wbt.set_verbose_mode(False)
+
+        specpts = f"{scratch}/spec.sdat"
+
+        processing.run("saga:surfacespecificpoints", {
+            'ELEVATION': input_path,
+            'METHOD': 0,
+            'THRESHOLD': 0,
+            'RESULT': specpts
+        })
+
+        thwg = f"{scratch}/thwg.tif"
+
+        processing.run("qgis:rastercalculator", {
+            'EXPRESSION': '"spec@1" = 1',
+            'LAYERS': [specpts],
+            'OUTPUT': thwg
+        })
+
+        thalwegs = f"{scratch}/thalwegs.tif"
+
+        wbt.line_thinning('thwg.tif', 'thalwegs.tif', feedback.pushInfo)
+
+        thalwegs_null = f"{scratch}/thalwegs_null.tif"
+
+        wbt.set_nodata_value(thalwegs, thalwegs_null, 0)
+
+        thalwegs3d = f"{scratch}/thalwegs3d.tif"
+
+        wbt.multiply(input_path, thalwegs_null, thalwegs3d)
+
+        basepts = f"{scratch}/basepts.shp"
+
+        processing.run("native:pixelstopoints", {
+            'INPUT_RASTER': thalwegs3d,
+            'RASTER_BAND': 1,
+            'FIELD_NAME': 'VALUE',
+            'OUTPUT': basepts
+        })
+
+        base = f"{scratch}/base.tif"
+        basetin = f"{scratch}/basetin.shp"
+
+        inp = gdal.Open(input_path)
+
+        processing.run("qgis:tininterpolation", {
+            'INTERPOLATION_DATA': basepts + '::~::0::~::0::~::0',
+            'METHOD': 0,
+            'EXTENT': input_path,
+            'PIXEL_SIZE': inp.GetGeoTransform()[1],
+            'COLUMNS': 0,
+            'ROWS': 0,
+            'TRIANGULATION': basetin,
+            'OUTPUT': base})
+
+        basep = f"{scratch}/basep.tif"
+
+        processing.run("gdal:warpreproject", {
+            'INPUT': base,
+            'SOURCE_CRS': input_path,
+            'TARGET_CRS': input_path,
+            'TARGET_EXTENT': input_path,
+            'RESAMPLING' : 0,
+            'OUTPUT': basep
+        })
+
+        heights = f"{scratch}/heights.tif"
+
+        wbt.subtract(input_path, basep, heights, feedback.pushInfo)
+
+        gheights = gdal.Open(heights)
+
+        hgtbnd = gheights.GetRasterBand(1)
+        nodata = hgtbnd.GetNoDataValue()
+
+        npheights = hgtbnd.ReadAsArray()
+        npheights[npheights == nodata] = np.nan
+
+        npheights_abs = np.absolute(npheights)
+        npheights_abs[npheights_abs == np.nan] = -1
+
+
+        swar = SpaceWidthAlgorithmRaster()
+
+        res = swar.execute(thalwegs, output_path, feedback, scratch, heights = npheights_abs)
+
+        npwidths = np.reshape(np.array(res[0]), npheights.shape)
+        npwidths[npwidths == -1] = np.nan
+
+        npweights = np.reshape(np.array(res[1]), npheights.shape)
+        npweights[npweights == -1] = np.nan
+
+        indices = np.logical_and(~np.isnan(npweights), ~np.isnan(npwidths))
+
+        avewidth = np.average(npwidths[indices], weights = npweights[indices])
+
+        feedback.pushInfo('WEIGHTED AVERAGE WIDTH: ' + str(round(avewidth, 0)))
+
+        feedback.pushInfo('MEDIAN SCALE: 1:' + str(round(np.median(npwidths[indices]) * 200, 0)))
+
+        feedback.pushInfo('WEIGHTED AVERAGE SCALE: 1:' + str(round(avewidth * 200, 0)))
+
+        return
+
+    def processAlgorithm(self, parameters, context, feedback):
+
+        input = self.parameterAsRasterLayer(parameters, self.INPUT, context)
+        output = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
+
+        scratch = CreateScratchFolder(os.path.dirname(input.dataProvider().dataSourceUri()))
+
+        self.execute(input.dataProvider().dataSourceUri(), output, feedback, scratch)
+
+        return {self.OUTPUT: output}
+
+class SpaceWidthAlgorithmUrban(QgsProcessingAlgorithm):
+    """
+        This is an example algorithm that takes a vector layer and
+        creates a new identical one.
+        It is meant to be used as an example of how to create your own
+        algorithms and explain methods and variables used to do it. An
+        algorithm like this will be available in all elements, and there
+        is not need for additional work.
+        All Processing algorithms should extend the QgsProcessingAlgorithm
+        class.
+        """
+
+    # Constants used to refer to parameters and outputs. They will be
+    # used when calling the algorithm from another algorithm, or when
+    # calling from the QGIS console.
+
+    INBLDS = 'INPUT'
+    INVEG = 'INPUTFULL'
+    NDIR = 'NDIR'
+    DIST = 'DIST'
+    THREADS = 'THREADS'
+    OUTPUT = 'OUTPUT'
+
+    def tr(self, string):
+        """
+        Returns a translatable string with the self.tr() function.
+        """
+        return QCoreApplication.translate('Processing', string)
+
+    def createInstance(self):
+        return SpaceWidthAlgorithmUrban()
+
+    def name(self):
+        """
+        Returns the algorithm name, used for identifying the algorithm. This
+        string should be fixed for the algorithm, and must not be localised.
+        The name should be unique within each provider. Names should contain
+        lowercase alphanumeric characters only and no spaces or other
+        formatting characters.
+        """
+        return 'spacewidthurban'
+
+    def displayName(self):
+        """
+        Returns the translated algorithm name, which should be used for any
+        user-visible display of the algorithm name.
+        """
+        return self.tr('Space Width (urban)')
+
+    def group(self):
+        """
+        Returns the name of the group this algorithm belongs to. This string
+        should be localised.
+        """
+        return self.tr(self.groupId())
+
+    def groupId(self):
+        """
+        Returns the unique ID of the group this algorithm belongs to. This
+        string should be fixed for the algorithm, and must not be localised.
+        The group id should be unique within each provider. Group id should
+        contain lowercase alphanumeric characters only and no spaces or other
+        formatting characters.
+        """
+        return ''
+
+    def shortHelpString(self):
+        """
+        Returns a localised short helper string for the algorithm. This string
+        should provide a basic description about what the algorithm does and the
+        parameters and outputs associated with it..
+        """
+        return self.tr("Estimates the free space at each pixel center using the maximum width approach. Uses raster input")
+
+    def initAlgorithm(self, config=None):
+        """
+        Here we define the inputs and output of the algorithm, along
+        with some other properties.
+        """
+
+        self.addParameter(
+            QgsProcessingParameterRasterLayer(
+                self.INBLDS,
+                self.tr('Input buildings raster'),
                 [QgsProcessing.TypeRaster]
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterRasterLayer(
+                self.INVEG,
+                self.tr('Input vegetation raster'),
+                [QgsProcessing.TypeRaster]
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.NDIR,
+                self.tr('Number of directions'),
+                type=QgsProcessingParameterNumber.Integer,
+                defaultValue=360,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.DIST,
+                self.tr('Maximum distance, raster units'),
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=10000,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.THREADS,
+                self.tr('Number of threads (if ≤0 then the number of hardware processor cores is used)'),
+                type=QgsProcessingParameterNumber.Integer,
+                defaultValue=0,
             )
         )
 
         self.addParameter(
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
-                self.tr('Output space raster')
+                self.tr('Output space geometry raster')
             )
         )
 
 
     def processAlgorithm(self, parameters, context, feedback):
 
-        source = self.parameterAsRasterLayer(parameters, self.INPUT, context)
+        buildings = self.parameterAsRasterLayer(parameters, self.INBLDS, context)
+        vegetation = self.parameterAsRasterLayer(parameters, self.INVEG, context)
+        ndirs = self.parameterAsInt(parameters, self.NDIR, context)
+        dist = self.parameterAsDouble(parameters, self.DIST, context)
+        threads = self.parameterAsInt(parameters, self.THREADS, context)
         output = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
 
         PINF = -3.402823466e+38
 
+        wbt = WhiteboxTools()
+        wbt.set_whitebox_dir('/Users/tsamsonov/GitHub/raster-space/raster_space/WBT/')
+        wbt.set_verbose_mode(False)
+
         outRasterSRS = osr.SpatialReference()
-        srs = source.crs()
+        srs = buildings.crs()
         wkt = srs.toWkt()
         outRasterSRS.ImportFromWkt(wkt)
 
-        src_ds = gdal.Open(source.dataProvider().dataSourceUri())
-        srcband = src_ds.GetRasterBand(1)
-
-        StepX = src_ds.GetGeoTransform()[1]
-
         drv = gdal.GetDriverByName('GTiff')
 
-        outdist = '/Users/tsamsonov/GitHub/raster-space/dist.tif'
-        dst_ds = drv.Create(outdist,
-                            src_ds.RasterXSize, src_ds.RasterYSize, 1,
-                            gdal.GetDataTypeByName('Float32'))
+        bld_ds = gdal.Open(buildings.dataProvider().dataSourceUri())
+        srcband_buildings = bld_ds.GetRasterBand(1)
+        outblds = '/Users/tsamsonov/GitHub/raster-space/dist_buildings.tif'
+        bld_dist_ds = drv.Create(outblds,
+                                bld_ds.RasterXSize, bld_ds.RasterYSize, 1,
+                                gdal.GetDataTypeByName('Float32'))
 
-        dst_ds.SetGeoTransform(src_ds.GetGeoTransform())
-        dst_ds.SetProjection(src_ds.GetProjectionRef())
+        bld_dist_ds.SetGeoTransform(bld_ds.GetGeoTransform())
+        bld_dist_ds.SetProjection(bld_ds.GetProjectionRef())
+        dstband_blds = bld_dist_ds.GetRasterBand(1)
+        gdal.ComputeProximity(srcband_buildings, dstband_blds, ["DISTUNITS=GEO"])
 
-        dstband = dst_ds.GetRasterBand(1)
+        npdist_buildings = np.array(dstband_blds.ReadAsArray())  # length testing
 
-        # In this example I'm using target pixel values of 100 and 300. I'm also using Distance units as GEO but you can change that to PIXELS.
-        gdal.ComputeProximity(srcband, dstband, ["DISTUNITS=GEO"])
-        dstband.FlushCache()
+        obst_ds = gdal.Open(vegetation.dataProvider().dataSourceUri())
+        srcband_obstacles = obst_ds.GetRasterBand(1)
+        outobst = '/Users/tsamsonov/GitHub/raster-space/dist_obstacles.tif'
+        obst_dist_ds = drv.Create(outobst,
+                                  obst_ds.RasterXSize, obst_ds.RasterYSize, 1,
+                                  gdal.GetDataTypeByName('Float32'))
 
-        dist = gdal.Open(outdist)
+        obst_dist_ds.SetGeoTransform(obst_ds.GetGeoTransform())
+        obst_dist_ds.SetProjection(obst_ds.GetProjectionRef())
+        dstband_obst = obst_dist_ds.GetRasterBand(1)
+        gdal.ComputeProximity(srcband_obstacles, dstband_obst, ["DISTUNITS=GEO"])
+        npdist_obstacles = np.array(dstband_obst.ReadAsArray())  # length testing
 
-        if dist is None:
-            QgsMessageLog.logMessage('Unable to open ' + outdist)
+        if npdist_buildings is None:
+            QgsMessageLog.logMessage('Unable to open ' + outobst)
         else:
-            QgsMessageLog.logMessage(str(dist.RasterCount))
-            npblocks = np.array(srcband.ReadAsArray()) # length testing
-            npdist = np.array(dstband.ReadAsArray())  # length testing
 
-            npwid0 = np.full(npdist.shape, 0)
-            nplen0 = np.full(npdist.shape, 0)
+            feedback.pushInfo('Building allocation...')
+            buildings_alloc = '/Users/tsamsonov/GitHub/raster-space/bld_alloc.tif'
+            wbt.euclidean_allocation(buildings.dataProvider().dataSourceUri(), buildings_alloc)
 
-            nodata = -1
+            hgtfile_blds = gdal.Open(buildings_alloc)
+            hgtband_blds = hgtfile_blds.GetRasterBand(1)
+            npheight_blds = np.array(hgtband_blds.ReadAsArray())
 
-            npwid = rspace.estimate_width(npdist, npwid0, StepX, nodata)
-            nplen = np.array(rspace.estimate_length(npblocks, npwid, StepX, nodata, 720, 12000)).reshape((4, npdist.shape[0], npdist.shape[1]))
+            feedback.pushInfo('Vegetation allocation...')
+            vegetation_alloc = '/Users/tsamsonov/GitHub/raster-space/veg_alloc.tif'
+            wbt.euclidean_allocation(vegetation.dataProvider().dataSourceUri(), vegetation_alloc)
 
-            QgsMessageLog.logMessage(rspace.__file__)
+            hgtfile_veg = gdal.Open(vegetation_alloc)
+            hgtband_veg = hgtfile_veg.GetRasterBand(1)
+            npheight_veg = np.array(hgtband_veg.ReadAsArray())
+
+            nodata = -1.0
 
             res = drv.Create(output,
-                             src_ds.RasterXSize, src_ds.RasterYSize, 5,
+                             bld_ds.RasterXSize, bld_ds.RasterYSize, 16,
                              gdal.GetDataTypeByName('Float32'))
 
-            res.SetGeoTransform(src_ds.GetGeoTransform())
-            res.SetProjection(src_ds.GetProjectionRef())
+            res.SetGeoTransform(bld_ds.GetGeoTransform())
+            res.SetProjection(bld_ds.GetProjectionRef())
 
-            outband = res.GetRasterBand(1)
-            outband.WriteArray(npwid, 0, 0)
+            StepX = bld_ds.GetGeoTransform()[1]
 
-            outband = res.GetRasterBand(2)
-            outband.WriteArray(nplen[0, :], 0, 0)
+            npres = rspace.estimate_space(npdist_buildings, npheight_blds, npdist_obstacles, npheight_veg,
+                                   StepX, nodata, ndirs, dist, threads, feedback.pushInfo, feedback.setProgress)
 
-            outband = res.GetRasterBand(3)
-            outband.WriteArray(nplen[1, :], 0, 0)
+            vars = {0: 'Width', 1: 'Height', 2: 'H/W Ratio', 3: 'Built', 4: 'Offset', 5: 'Sky View Factor', 6: 'Dominant',
+                    7: 'Length 1', 8: 'Direction 1', 9: 'Position 1', 10: 'Average Width 1',
+                    11: 'Average Height 1', 12: 'Average H/W Ratio 1', 13: 'Average Built 1',
+                    14: 'Average Offset 1', 15: 'Average Sky View Factor 1'}
 
-            outband = res.GetRasterBand(4)
-            outband.WriteArray(nplen[2, :], 0, 0)
+            for i in vars:
+                outband = res.GetRasterBand(i+1)
+                outband.SetDescription(vars[i])
+                outband.WriteArray(npres[i, :, :], 0, 0)
+                outband.FlushCache()
+                outband.SetNoDataValue(-1)
 
-            outband = res.GetRasterBand(5)
-            outband.WriteArray(nplen[3, :], 0, 0)
-
-            outband.FlushCache()
-            outband.SetNoDataValue(-1)
-
-        return {self.OUTPUT: source}
+        return {self.OUTPUT: output}
 

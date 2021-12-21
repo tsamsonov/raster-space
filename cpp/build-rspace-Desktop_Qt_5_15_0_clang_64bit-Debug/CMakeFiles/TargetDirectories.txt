@@ -1,5 +1,0 @@
-/Users/tsamsonov/GitHub/raster-space/cpp/build-rspace-Desktop_Qt_5_15_0_clang_64bit-Debug/CMakeFiles/rebuild_cache.dir
-/Users/tsamsonov/GitHub/raster-space/cpp/build-rspace-Desktop_Qt_5_15_0_clang_64bit-Debug/CMakeFiles/edit_cache.dir
-/Users/tsamsonov/GitHub/raster-space/cpp/build-rspace-Desktop_Qt_5_15_0_clang_64bit-Debug/CMakeFiles/rspace.dir
-/Users/tsamsonov/GitHub/raster-space/cpp/build-rspace-Desktop_Qt_5_15_0_clang_64bit-Debug/pybind11/CMakeFiles/rebuild_cache.dir
-/Users/tsamsonov/GitHub/raster-space/cpp/build-rspace-Desktop_Qt_5_15_0_clang_64bit-Debug/pybind11/CMakeFiles/edit_cache.dir
